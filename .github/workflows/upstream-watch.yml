@@ -1,0 +1,40 @@
+name: Upstream watch
+
+on:
+  schedule:
+    - cron: '17 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - run: python -m pip install packaging
+    - name: Check the latest official pynamodb release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set +e
+        latest=$(python scripts/upstream_watch.py --spec '>=6.1,<6.2')
+        rc=$?
+        set -e
+        if [ "$rc" != "0" ] && [ "$rc" != "2" ]; then exit 1; fi
+        if [ "$rc" = "2" ] && [ -z "$latest" ]; then
+          echo "upstream_watch.py exited 2 without a version (argument error?)" >&2
+          exit 1
+        fi
+        if [ "$rc" = "2" ]; then
+          title="Official pynamodb $latest released - port and widen the supported range"
+          if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[].number')" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body "pynamodb-async supports pynamodb >=6.1,<6.2. Official pynamodb $latest is outside that range. Port any changes, run the tests against it, and widen the dependency pin."
+          fi
+        fi

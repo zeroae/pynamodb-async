@@ -1,0 +1,4 @@
+src/pynamodb_async/_version.py
+dist/
+__pycache__/
+uv.lock

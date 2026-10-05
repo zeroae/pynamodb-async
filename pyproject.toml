@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.24", "hatch-vcs>=0.5", "setuptools-scm>=10"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pynamodb-async"
+dynamic = ["version"]
+description = "Native asyncio API for PynamoDB, built on aiobotocore"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["pynamodb>=6.1,<6.2", "aiobotocore>=2.13.0"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Source = "https://github.com/zeroae/pynamodb-async"
+Issues = "https://github.com/zeroae/pynamodb-async/issues"
+PynamoDB = "https://github.com/pynamodb/PynamoDB"
+
+[dependency-groups]
+test = ["pytest>=7", "pytest-asyncio>=0.23", "pytest-env", "pytest-mock", "freezegun", "blinker>=1.3,<2.0", "packaging"]
+
+[tool.hatch.version]
+source = "vcs"
+tag-pattern = '^pynamodb-async-v(?P<version>\d+(?:\.\d+)*(?:(?:a|b|rc|\.post|\.dev)\d+)?)$'
+raw-options = { search_parent_directories = true, fallback_version = "0.1.0.dev0", scm = { git = { describe_command = "git describe --dirty --tags --long --match 'pynamodb-async-v*'" } } }
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/pynamodb_async/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pynamodb_async"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "scripts", "README.md", "RELEASE_NOTES.rst", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["ddblocal: requires a DynamoDB Local server on localhost:8000"]
+env = ["AWS_ACCESS_KEY_ID=1", "AWS_SECRET_ACCESS_KEY=2", "AWS_DEFAULT_REGION=us-east-1"]

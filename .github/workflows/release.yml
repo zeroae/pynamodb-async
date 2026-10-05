@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags: ['pynamodb-async-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version whose release notes to check, e.g. 0.1.0 (dispatch runs are dry runs: nothing is published)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  notes:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - uses: actions/checkout@v4
+    - id: version
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        if [ "$GITHUB_EVENT_NAME" = "push" ]; then v="${GITHUB_REF_NAME#pynamodb-async-v}"; else v="$INPUT_VERSION"; fi
+        echo "version=$v" >> "$GITHUB_OUTPUT"
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Release notes section exists
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+      run: python scripts/release_notes.py RELEASE_NOTES.rst "$VERSION" --output notes.md
+    - uses: actions/upload-artifact@v4
+      with:
+        name: notes
+        path: notes.md
+
+  tests:
+    uses: ./.github/workflows/test.yml
+
+  build:
+    needs: notes
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: astral-sh/setup-uv@v6
+    - run: uv python install 3.11
+    - run: uv build -o dist
+    - name: Check the distribution
+      env:
+        VERSION: ${{ needs.notes.outputs.version }}
+      run: |
+        if [ "$GITHUB_EVENT_NAME" = "push" ]; then check=(--expect-version "$VERSION"); else check=(--min-version 0.1.0.dev0); fi
+        uv run --no-project --python 3.11 --with packaging python scripts/check_dist.py dist \
+          --name pynamodb-async --package pynamodb_async --requires-python '>=3.10' "${check[@]}" \
+          --sdist-allow 'src/*' --sdist-allow 'tests/*' --sdist-allow 'scripts/*' --sdist-allow README.md \
+          --sdist-allow RELEASE_NOTES.rst --sdist-allow LICENSE --sdist-allow pyproject.toml --sdist-allow PKG-INFO \
+          --sdist-allow .gitignore
+    - uses: actions/upload-artifact@v4
+      with:
+        name: release-dist
+        path: dist/
+
+  publish-pypi:
+    needs: [notes, tests, build]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: release-dist
+        path: dist/
+    - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: [notes, publish-pypi]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: notes
+    - uses: actions/download-artifact@v4
+      with:
+        name: release-dist
+        path: dist/
+    - env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ needs.notes.outputs.version }}
+      run: |
+        gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+          --title "pynamodb-async $VERSION" --notes-file notes.md

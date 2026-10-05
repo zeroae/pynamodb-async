@@ -1,6 +1,18 @@
 Release Notes
 =============
 
+v0.1.1
+------
+
+Fixes:
+
+* ``pynamodb_async.connections()`` no longer fails with "Set changed size during iteration" when
+  another thread opens a connection while it closes connections; the set of open connections is
+  now guarded by a lock.
+* ``pynamodb_async.connections()`` now closes only the connections whose client belongs to the
+  running event loop. Connections opened on another event loop or thread are left for that loop to
+  close, instead of having their client dropped from under them.
+
 v0.1.0
 ------
 

@@ -31,7 +31,7 @@ jobs:
     - name: Release notes section exists
       env:
         VERSION: ${{ steps.version.outputs.version }}
-      run: python scripts/release_notes.py RELEASE_NOTES.rst "$VERSION" --output notes.md
+      run: python scripts/release_notes.py RELEASE_NOTES.rst "$VERSION" --unwrap --output notes.md
     - uses: actions/upload-artifact@v4
       with:
         name: notes
@@ -81,6 +81,7 @@ jobs:
 
   github-release:
     needs: [notes, publish-pypi]
+    if: github.event_name == 'push'
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -88,6 +89,7 @@ jobs:
     - uses: actions/download-artifact@v4
       with:
         name: notes
+    - uses: astral-sh/setup-uv@v6
     - uses: actions/download-artifact@v4
       with:
         name: release-dist
@@ -96,5 +98,9 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         VERSION: ${{ needs.notes.outputs.version }}
       run: |
+        # Ask packaging, as check_dist does, so every PEP 440 spelling (rc1, .rc1, c1, alpha1, .dev) agrees.
+        flags=()
+        pre=$(uv run --no-project --python 3.11 --with packaging python -c 'import os; from packaging.version import Version; print(str(Version(os.environ["VERSION"]).is_prerelease).lower())')
+        if [ "$pre" = true ]; then flags=(--prerelease); fi
         gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
-          --title "pynamodb-async $VERSION" --notes-file notes.md
+          --title "pynamodb-async $VERSION" --notes-file notes.md "${flags[@]}"

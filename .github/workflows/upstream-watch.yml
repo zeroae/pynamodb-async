@@ -26,12 +26,13 @@ jobs:
         latest=$(python scripts/upstream_watch.py --spec '>=6.1,<6.2')
         rc=$?
         set -e
-        if [ "$rc" != "0" ] && [ "$rc" != "2" ]; then exit 1; fi
-        if [ "$rc" = "2" ] && [ -z "$latest" ]; then
-          echo "upstream_watch.py exited 2 without a version (argument error?)" >&2
+        # 0 = supported, 3 = out of range; anything else (1 error, 2 bad arguments) fails the job.
+        if [ "$rc" != "0" ] && [ "$rc" != "3" ]; then exit 1; fi
+        if [ "$rc" = "3" ] && [ -z "$latest" ]; then
+          echo "upstream_watch.py reported out of range without a version" >&2
           exit 1
         fi
-        if [ "$rc" = "2" ]; then
+        if [ "$rc" = "3" ]; then
           title="Official pynamodb $latest released - port and widen the supported range"
           if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[].number')" ]; then
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \

@@ -28,6 +28,7 @@ from typing import Union
 from typing import cast
 
 from pynamodb._schema import ModelSchema
+from pynamodb_async import _compat
 from pynamodb_async.connection.base import MetaTable
 
 if sys.version_info >= (3, 8):
@@ -48,7 +49,6 @@ from pynamodb_async.indexes import Index
 from pynamodb_async.pagination import ResultIterator
 from pynamodb.settings import get_settings_value
 from pynamodb import constants
-from pynamodb_async import _compat
 from pynamodb.constants import (
     ATTR_NAME, ATTR_TYPE,
     KEY_TYPE, ITEM,

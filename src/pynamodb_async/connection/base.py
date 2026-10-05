@@ -7,8 +7,8 @@ import logging
 import uuid
 import weakref
 from contextlib import asynccontextmanager
-from threading import local
-from typing import Any, AsyncIterator, Dict, Hashable, List, Mapping, Optional, Sequence, Union, cast
+from threading import Lock, local
+from typing import Any, Dict, Hashable, AsyncIterator, List, Mapping, Optional, Sequence, Union, cast
 if sys.version_info >= (3, 8):
     from typing import Literal
 else:
@@ -30,7 +30,7 @@ from pynamodb.constants import (
     EXCLUSIVE_START_KEY, SCAN_INDEX_FORWARD, ATTR_DEFINITIONS,
     BATCH_WRITE_ITEM, CONSISTENT_READ, DESCRIBE_TABLE, KEY_CONDITION_EXPRESSION,
     BATCH_GET_ITEM, DELETE_REQUEST, SELECT_VALUES, RETURN_VALUES, REQUEST_ITEMS,
-    PROJECTION_EXPRESSION, SERVICE_NAME, DELETE_ITEM, PUT_REQUEST, UPDATE_ITEM, TABLE_NAME,
+    PROJECTION_EXPRESSION, DELETE_ITEM, PUT_REQUEST, UPDATE_ITEM, TABLE_NAME,
     INDEX_NAME, KEY_SCHEMA, ATTR_NAME, ATTR_TYPE, TABLE_KEY, KEY_TYPE, GET_ITEM, UPDATE,
     PUT_ITEM, SELECT, LIMIT, QUERY, SCAN, ITEM, LOCAL_SECONDARY_INDEXES,
     KEYS, KEY, SEGMENT, TOTAL_SEGMENTS, CREATE_TABLE, PROVISIONED_THROUGHPUT, READ_CAPACITY_UNITS,
@@ -66,7 +66,10 @@ RATE_LIMITING_ERROR_CODES = ['ProvisionedThroughputExceededException', 'Throttli
 log = logging.getLogger(__name__)
 log.addHandler(logging.NullHandler())
 
+# Connections that opened a client. Guarded by the lock: connections may be opened and closed
+# from several threads (each with its own event loop) while connections() takes a snapshot.
 _open_connections: "weakref.WeakSet[Connection]" = weakref.WeakSet()
+_open_connections_lock = Lock()
 
 
 class MetaTable(object):
@@ -459,7 +462,8 @@ class Connection(object):
                 retries=retries,
             )
             self._client = cast(BotocoreBaseClientPrivate, await _compat.open_client(self, config))
-            _open_connections.add(self)
+            with _open_connections_lock:
+                _open_connections.add(self)
         return cast(BotocoreBaseClientPrivate, self._client)
 
     def _client_key(self) -> Hashable:
@@ -488,7 +492,8 @@ class Connection(object):
         if self._client is not None:
             await _compat.close_client(self)
             self._client = None
-        _open_connections.discard(self)
+        with _open_connections_lock:
+            _open_connections.discard(self)
 
     def add_meta_table(self, meta_table: MetaTable) -> None:
         """
@@ -1301,10 +1306,19 @@ class Connection(object):
 @asynccontextmanager
 async def connections() -> AsyncIterator[None]:
     """
-    Closes every connection that opened a client, when the block exits
+    Closes the connections that opened a client, when the block exits
+
+    Async: only connections whose client belongs to the running event loop are closed. A client
+    opened on another loop cannot be closed from this one, so its connection is left alone; close
+    it on its own loop. A connection whose event loop has already been garbage-collected is skipped
+    (its client cannot be closed from here) and is replaced the next time it is used.
+    Sync: closes every connection that opened a client.
     """
     try:
         yield
     finally:
-        for connection in list(_open_connections):
-            await connection.close()
+        with _open_connections_lock:
+            snapshot = list(_open_connections)
+        for connection in snapshot:
+            if _compat.client_on_running_loop(connection):
+                await connection.close()

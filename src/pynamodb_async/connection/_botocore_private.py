@@ -23,7 +23,8 @@ class BotocoreBaseClientPrivate(AioBaseClient):
     _endpoint: BotocoreEndpointPrivate
     _request_signer: BotocoreRequestSignerPrivate
 
-    async def _make_api_call(        self,
+    async def _make_api_call(
+        self,
         operation_name: str,
         operation_kwargs: Dict,
     ) -> Dict:

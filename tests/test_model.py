@@ -292,7 +292,7 @@ class ComplexKeyModel(Model):
         table_name = 'ComplexKey'
 
     name = UnicodeAttribute(hash_key=True)
-    date_created = UTCDateTimeAttribute(default=datetime.utcnow)
+    date_created = UTCDateTimeAttribute(default=lambda: datetime.now(timezone.utc))
 
 
 class Location(MapAttribute):

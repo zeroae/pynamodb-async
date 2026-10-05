@@ -2,9 +2,9 @@
 # Unused, but kept so that user code which patches `time` through this
 # module (`mock.patch('<module>.time')`) keeps working.
 import time  # noqa: F401
-from pynamodb_async import _compat
 from typing import Any, Callable, Dict, Iterable, AsyncIterator, Optional, TypeVar
 
+from pynamodb_async import _compat
 from pynamodb.constants import (CAMEL_COUNT, ITEMS, LAST_EVALUATED_KEY, SCANNED_COUNT,
                                 CONSUMED_CAPACITY, TOTAL, CAPACITY_UNITS)
 

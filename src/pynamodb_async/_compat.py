@@ -60,6 +60,15 @@ def client_usable(connection: Any) -> bool:
     return _held_loop(connection) is loop
 
 
+def client_on_running_loop(connection: Any) -> bool:
+    """Whether this connection's client belongs to the running event loop (so it can be closed here)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return _held_loop(connection) is loop
+
+
 class _Entry:
     __slots__ = ('client', 'refs')
 

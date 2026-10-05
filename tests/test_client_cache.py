@@ -55,14 +55,18 @@ async def test_poisoned_shared_client_is_replaced():
     await b.close()
 
 
-def test_separate_event_loops_get_separate_clients():
+async def test_separate_event_loops_get_separate_clients():
     conn = Connection(region='us-east-1')
     async def use_and_close():
         client = await conn.get_client()
         await conn.close()
         return client
 
-    assert asyncio.run(use_and_close()) is not asyncio.run(use_and_close())
+    # asyncio.run() in worker threads: on the test's own thread it would unset (and leak)
+    # the event loop pytest-asyncio provides.
+    first = await asyncio.to_thread(asyncio.run, use_and_close())
+    second = await asyncio.to_thread(asyncio.run, use_and_close())
+    assert first is not second
 
 
 async def test_connections_context_closes_everything():
@@ -88,7 +92,7 @@ async def _send_with_real_session(self, request):
 
 
 @pytest.mark.filterwarnings('ignore::ResourceWarning')
-def test_finished_loop_is_dropped_from_cache_without_close():
+async def test_finished_loop_is_dropped_from_cache_without_close():
     loops = []
 
     async def use_without_close():
@@ -103,8 +107,8 @@ def test_finished_loop_is_dropped_from_cache_without_close():
         await conn.close()
 
     with patch('aiobotocore.httpsession.AIOHTTPSession.send', _send_with_real_session):
-        asyncio.run(use_without_close())
-    asyncio.run(open_on_new_loop())
+        await asyncio.to_thread(asyncio.run, use_without_close())
+    await asyncio.to_thread(asyncio.run, open_on_new_loop())
     gc.collect()
     assert loops[0]() is None
     assert not [per_loop for per_loop in _compat._clients.values() if per_loop]
@@ -205,3 +209,98 @@ async def test_last_holder_closing_while_extra_client_closes_keeps_shared_open()
         finally:
             await a.close()
         assert shared in exited
+
+
+async def test_connections_leaves_other_loops_connections_alone():
+    import threading
+
+    from pynamodb_async.connection.base import _open_connections
+
+    opened, finish = threading.Event(), threading.Event()
+    other = Connection(region='us-east-1')
+    outcome = {}
+
+    def run_other_loop():
+        async def worker():
+            await other.get_client()
+            opened.set()
+            await asyncio.to_thread(finish.wait)
+            outcome['client_still_open'] = other._client is not None
+            await other.close()  # closed on its own loop
+
+        asyncio.run(worker())
+
+    thread = threading.Thread(target=run_other_loop)
+    thread.start()
+    try:
+        await asyncio.to_thread(opened.wait)
+        mine = Connection(region='eu-west-1')
+        async with pynamodb_async.connections():
+            await mine.get_client()
+        assert mine._client is None  # this loop's connection was closed
+        assert other._client is not None  # the other loop's one was not
+        assert other in _open_connections
+    finally:
+        finish.set()
+        thread.join()
+    assert outcome == {'client_still_open': True}
+    assert other not in _open_connections
+
+
+async def test_open_connections_is_locked_while_connections_snapshots_and_mutates():
+    from pynamodb_async.connection import base
+
+    seen = []
+
+    class RecordingSet(weakref.WeakSet):
+        def __iter__(self):
+            seen.append(('iter', base._open_connections_lock.locked()))
+            return super().__iter__()
+
+        def add(self, item):
+            seen.append(('add', base._open_connections_lock.locked()))
+            super().add(item)
+
+        def discard(self, item):
+            seen.append(('discard', base._open_connections_lock.locked()))
+            super().discard(item)
+
+    with patch.object(base, '_open_connections', RecordingSet()):
+        async with pynamodb_async.connections():
+            conn = Connection(region='us-east-1')
+            await conn.get_client()
+    assert conn._client is None
+    assert {'add', 'iter', 'discard'} <= {op for op, _ in seen}
+    assert all(locked for _, locked in seen)
+
+
+async def test_connections_survives_concurrent_opens_and_closes_on_other_threads():
+    import threading
+
+    stop = threading.Event()
+    errors = []
+
+    def churn():
+        async def work():
+            while not stop.is_set():
+                conn = Connection(region='us-east-1')
+                await conn.get_client()
+                await conn.close()
+
+        try:
+            asyncio.run(work())
+        except BaseException as e:  # noqa: B036
+            errors.append(e)
+
+    threads = [threading.Thread(target=churn) for _ in range(3)]
+    for t in threads:
+        t.start()
+    try:
+        for _ in range(50):
+            async with pynamodb_async.connections():
+                await asyncio.sleep(0)
+    finally:
+        stop.set()
+        for t in threads:
+            t.join()
+    assert errors == []

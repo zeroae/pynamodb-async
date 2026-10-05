@@ -30,12 +30,19 @@ async def test_close_without_open_is_noop():
     await Connection(region='us-east-1').close()
 
 
-def test_new_event_loop_gets_new_client():
+async def test_new_event_loop_gets_new_client():
     conn = Connection(region='us-east-1')
-    c1 = asyncio.run(conn.get_client())
-    c2 = asyncio.run(conn.get_client())
+
+    async def open_and_close():
+        client = await conn.get_client()
+        await conn.close()  # on the loop that opened the client
+        return client
+
+    # asyncio.run() in a worker thread: on the test's own thread it would unset (and leak)
+    # the event loop pytest-asyncio provides.
+    c1 = await asyncio.to_thread(asyncio.run, open_and_close())
+    c2 = await asyncio.to_thread(asyncio.run, open_and_close())
     assert c1 is not c2
-    asyncio.run(conn.close())
 
 
 async def test_repr_does_not_raise_before_open():

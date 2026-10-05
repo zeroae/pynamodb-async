@@ -7,7 +7,6 @@ import json
 from datetime import datetime
 from uuid import UUID
 
-import urllib3
 from unittest import mock
 from unittest.mock import patch
 

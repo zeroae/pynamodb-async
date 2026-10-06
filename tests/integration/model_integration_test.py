@@ -143,3 +143,37 @@ def test_can_inherit_version_attribute(ddb_url) -> None:
 
             version_invalid = VersionAttribute()
     assert str(e.value) == 'The model has more than one Version attribute: version, version_invalid'
+
+
+@pytest.mark.ddblocal
+async def test_blind_update_increments_stored_version(ddb_url: str) -> None:
+    # A blind update (version not loaded) must increment the stored version, never reset it to 1
+    # (pynamodb/pynamodb#1247; Saturn-Technologies/async-pynamodb 5903f16).
+    class BlindVersionModel(Model):
+        class Meta:
+            table_name = 'pynamodb-ci-blind-version'
+            host = ddb_url
+
+        pkey = UnicodeAttribute(hash_key=True)
+        note = UnicodeAttribute(null=True)
+        version = VersionAttribute()
+
+    if await BlindVersionModel.exists():
+        await BlindVersionModel.delete_table()
+    await BlindVersionModel.create_table(read_capacity_units=1, write_capacity_units=1, wait=True)
+
+    await BlindVersionModel('a', note='x', version=2).save(add_version_condition=False)
+    stored = await BlindVersionModel.get('a')
+    assert stored.version == 3
+
+    blind = BlindVersionModel('a')
+    assert blind.version is None
+    await blind.update(actions=[BlindVersionModel.note.set('y')], add_version_condition=False)
+
+    stored = await BlindVersionModel.get('a')
+    assert stored.note == 'y'
+    assert stored.version == 4
+
+    # A blind update of an item that does not exist yet starts at 1.
+    await BlindVersionModel('b').update(actions=[BlindVersionModel.note.set('z')], add_version_condition=False)
+    assert (await BlindVersionModel.get('b')).version == 1

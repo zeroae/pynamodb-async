@@ -3302,6 +3302,9 @@ async def test_version_attribute_increments_on_update(add_version_condition: boo
                     'S': 'new@email.com'
                 },
                 ':1': {
+                    'N': '0'
+                },
+                ':2': {
                     'N': '1'
                 }
             },
@@ -3318,12 +3321,12 @@ async def test_version_attribute_increments_on_update(add_version_condition: boo
             expected.update({
                 'ConditionExpression': 'attribute_not_exists (#0)',
                 'ExpressionAttributeNames': {'#0': 'version', '#1': 'email'},
-                'UpdateExpression': 'SET #1 = :0, #0 = :1',
+                'UpdateExpression': 'SET #1 = :0, #0 = if_not_exists (#0, :1) + :2',
             })
         else:
             expected.update({
                 'ExpressionAttributeNames': {'#0': 'email', '#1': 'version'},
-                'UpdateExpression': 'SET #0 = :0, #1 = :1',
+                'UpdateExpression': 'SET #0 = :0, #1 = if_not_exists (#1, :1) + :2',
             })
 
         assert args == expected
@@ -3468,3 +3471,107 @@ async def test_delete_with_wait(mocker):
     assert result == mock__get_connection.return_value.delete_table.return_value
     # Should have called exists 3 times.
     assert mock_exists.call_count == 3
+
+
+class RenamedVersionModel(Model):
+    class Meta:
+        table_name = 'RenamedVersionModel'
+
+    name = UnicodeAttribute(hash_key=True)
+    email = UnicodeAttribute(null=True)
+    version = VersionAttribute(attr_name='v')
+
+
+async def test_blind_update_increments_version_with_if_not_exists() -> None:
+    # The version is not loaded: never reset a stored version to 1, increment it
+    # (Saturn-Technologies/async-pynamodb 5903f16; pynamodb/pynamodb#1247).
+    item = VersionedModel('test_user_name', email='test_user@email.com')
+    assert item.version is None
+
+    with patch(PATCH_METHOD) as req:
+        req.return_value = {ATTRIBUTES: {'name': {'S': 'test_user_name'}, 'version': {'N': '4'}}}
+        await item.update(actions=[VersionedModel.email.set('new@email.com')], add_version_condition=False)
+        args = req.call_args[0][1]
+
+    assert args['UpdateExpression'] == 'SET #0 = :0, #1 = if_not_exists (#1, :1) + :2'
+    assert args['ExpressionAttributeNames'] == {'#0': 'email', '#1': 'version'}
+    assert args['ExpressionAttributeValues'] == {
+        ':0': {'S': 'new@email.com'}, ':1': {'N': '0'}, ':2': {'N': '1'},
+    }
+    assert 'ConditionExpression' not in args
+
+
+async def test_blind_update_with_version_condition_still_requires_missing_version() -> None:
+    item = VersionedModel('test_user_name', email='test_user@email.com')
+
+    with patch(PATCH_METHOD) as req:
+        req.return_value = {ATTRIBUTES: {'name': {'S': 'test_user_name'}, 'version': {'N': '1'}}}
+        await item.update(actions=[VersionedModel.email.set('new@email.com')])
+        args = req.call_args[0][1]
+
+    assert args['ConditionExpression'] == 'attribute_not_exists (#0)'
+    assert args['UpdateExpression'] == 'SET #1 = :0, #0 = if_not_exists (#0, :1) + :2'
+    assert args['ExpressionAttributeNames'] == {'#0': 'version', '#1': 'email'}
+
+
+async def test_loaded_version_update_is_unchanged() -> None:
+    item = VersionedModel('test_user_name', email='test_user@email.com', version=3)
+
+    with patch(PATCH_METHOD) as req:
+        req.return_value = {ATTRIBUTES: {'name': {'S': 'test_user_name'}, 'version': {'N': '4'}}}
+        await item.update(actions=[VersionedModel.email.set('new@email.com')])
+        args = req.call_args[0][1]
+
+    assert args['ConditionExpression'] == '#0 = :0'
+    assert args['UpdateExpression'] == 'SET #1 = :1 ADD #0 :2'
+    assert args['ExpressionAttributeValues'] == {
+        ':0': {'N': '3'}, ':1': {'S': 'new@email.com'}, ':2': {'N': '1'},
+    }
+
+
+@pytest.mark.parametrize('loaded', [True, False])
+async def test_caller_version_action_replaces_automatic_one(loaded: bool) -> None:
+    # Two actions on the same path make DynamoDB reject the request
+    # (Saturn-Technologies/async-pynamodb 94ef068).
+    item = VersionedModel('test_user_name', email='test_user@email.com', **({'version': 3} if loaded else {}))
+
+    with patch(PATCH_METHOD) as req:
+        req.return_value = {ATTRIBUTES: {'name': {'S': 'test_user_name'}, 'version': {'N': '10'}}}
+        await item.update(
+            actions=[VersionedModel.email.set('new@email.com'), VersionedModel.version.set(10)],
+        )
+        args = req.call_args[0][1]
+
+    assert args['UpdateExpression'] == ('SET #1 = :1, #0 = :2' if loaded else 'SET #1 = :0, #0 = :1')
+    assert list(args['ExpressionAttributeNames'].values()).count('version') == 1
+    # the version condition is kept
+    assert args['ConditionExpression'] == ('#0 = :0' if loaded else 'attribute_not_exists (#0)')
+    assert {'N': '10'} in args['ExpressionAttributeValues'].values()
+    assert {'N': '1'} not in args['ExpressionAttributeValues'].values()
+
+
+@pytest.mark.parametrize('loaded', [True, False])
+async def test_caller_version_action_with_attr_name(loaded: bool) -> None:
+    # The stored name ('v') differs from the Python name ('version'): compare stored paths.
+    item = RenamedVersionModel('test_user_name', **({'version': 3} if loaded else {}))
+
+    with patch(PATCH_METHOD) as req:
+        req.return_value = {ATTRIBUTES: {'name': {'S': 'test_user_name'}, 'v': {'N': '10'}}}
+        await item.update(actions=[RenamedVersionModel.version.set(10)])
+        args = req.call_args[0][1]
+
+    assert list(args['ExpressionAttributeNames'].values()) == ['v']
+    assert args['UpdateExpression'] == ('SET #0 = :1' if loaded else 'SET #0 = :0')
+    assert args['ConditionExpression'] == ('#0 = :0' if loaded else 'attribute_not_exists (#0)')
+
+
+async def test_blind_update_with_attr_name_uses_stored_name() -> None:
+    item = RenamedVersionModel('test_user_name')
+
+    with patch(PATCH_METHOD) as req:
+        req.return_value = {ATTRIBUTES: {'name': {'S': 'test_user_name'}, 'v': {'N': '4'}}}
+        await item.update(actions=[RenamedVersionModel.email.set('x')], add_version_condition=False)
+        args = req.call_args[0][1]
+
+    assert args['UpdateExpression'] == 'SET #0 = :0, #1 = if_not_exists (#1, :1) + :2'
+    assert args['ExpressionAttributeNames'] == {'#0': 'email', '#1': 'v'}

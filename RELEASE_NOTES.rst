@@ -1,6 +1,26 @@
 Release Notes
 =============
 
+v0.1.2
+------
+
+Fixes:
+
+* Updating a model with a ``VersionAttribute`` without loading it first (``Model(id).update(...)``,
+  or ``TransactWrite.update``) and ``add_version_condition=False`` no longer sets the stored version
+  to 1, which rolled a stored version back (for example from 3 to 1). With the default version
+  condition the old code failed the update instead. The update now sets the version to
+  ``if_not_exists(version, 0) + 1``, so the stored version is incremented. The version condition and
+  updates of a loaded model are unchanged. This fixes upstream PynamoDB issue #1247.
+* ``update()`` no longer sends two actions on the version attribute when you pass your own action
+  on it (DynamoDB rejected that with "Two document paths overlap"). Your action replaces the
+  automatic increment; the version condition still applies.
+* After ``TransactWrite.update`` commits, the local model's version is now ``None`` (unknown) when the
+  version was not loaded or you supplied your own version action, instead of a guessed value; call
+  ``refresh()`` to load it. A loaded version is still incremented locally as before.
+
+The first two fixes come from Saturn-Technologies/async-pynamodb (MIT), commits 5903f16 and 94ef068.
+
 v0.1.1
 ------
 

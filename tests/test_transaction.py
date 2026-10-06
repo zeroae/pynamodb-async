@@ -136,9 +136,9 @@ class TestTransactWrite:
             'TableName': 'mock',
             'Key': {'mock_hash': {'N': '4'}, 'mock_range': {'N': '6'}},
             'ReturnValuesOnConditionCheckFailure': 'ALL_OLD',
-            'UpdateExpression': 'SET #1 = :0, #0 = :1',
+            'UpdateExpression': 'SET #1 = :0, #0 = if_not_exists (#0, :1) + :2',
             'ExpressionAttributeNames': {'#0': 'mock_version', '#1': 'mock_toot'},
-            'ExpressionAttributeValues': {':0': {'S': 'hello'}, ':1': {'N': '1'}}
+            'ExpressionAttributeValues': {':0': {'S': 'hello'}, ':1': {'N': '0'}, ':2': {'N': '1'}}
         }]
         mock_connection_transact_write.assert_awaited_once_with(
             condition_check_items=expected_condition_checks,
@@ -149,3 +149,67 @@ class TestTransactWrite:
             return_consumed_capacity=None,
             return_item_collection_metrics=None
         )
+
+    async def test_update__blind_version_uses_if_not_exists(self, mocker):
+        # Version not loaded: increment the stored version instead of resetting it to 1
+        # (Saturn-Technologies/async-pynamodb 5903f16; pynamodb/pynamodb#1247).
+        connection = Connection()
+        mock_connection_transact_write = mocker.patch.object(connection, 'transact_write_items')
+        async with TransactWrite(connection=connection) as t:
+            t.update(MockModel(4, 6), actions=[MockModel.mock_toot.set('hello')])
+
+        update_items = mock_connection_transact_write.call_args[1]['update_items']
+        assert update_items == [{
+            'ConditionExpression': 'attribute_not_exists (#0)',
+            'TableName': 'mock',
+            'Key': {'mock_hash': {'N': '4'}, 'mock_range': {'N': '6'}},
+            'UpdateExpression': 'SET #1 = :0, #0 = if_not_exists (#0, :1) + :2',
+            'ExpressionAttributeNames': {'#0': 'mock_version', '#1': 'mock_toot'},
+            'ExpressionAttributeValues': {':0': {'S': 'hello'}, ':1': {'N': '0'}, ':2': {'N': '1'}},
+        }]
+
+    async def test_update__loaded_version_is_unchanged(self, mocker):
+        connection = Connection()
+        mock_connection_transact_write = mocker.patch.object(connection, 'transact_write_items')
+        async with TransactWrite(connection=connection) as t:
+            t.update(MockModel(4, 6, mock_version=2), actions=[MockModel.mock_toot.set('hello')])
+
+        update_items = mock_connection_transact_write.call_args[1]['update_items']
+        assert update_items[0]['UpdateExpression'] == 'SET #1 = :1 ADD #0 :2'
+
+    async def test_update__caller_version_action_replaces_automatic_one(self, mocker):
+        connection = Connection()
+        mock_connection_transact_write = mocker.patch.object(connection, 'transact_write_items')
+        async with TransactWrite(connection=connection) as t:
+            t.update(MockModel(4, 6), actions=[MockModel.mock_version.set(9)])
+
+        update_items = mock_connection_transact_write.call_args[1]['update_items']
+        assert update_items[0]['UpdateExpression'] == 'SET #0 = :0'
+        assert update_items[0]['ConditionExpression'] == 'attribute_not_exists (#0)'
+        assert update_items[0]['ExpressionAttributeValues'] == {':0': {'N': '9'}}
+
+    async def test_update__local_version_is_unknown_after_blind_update(self, mocker):
+        # The stored version was incremented by an unknown amount: do not guess it locally.
+        connection = Connection()
+        mocker.patch.object(connection, 'transact_write_items')
+        model = MockModel(4, 6)
+        async with TransactWrite(connection=connection) as t:
+            t.update(model, actions=[MockModel.mock_toot.set('hello')], add_version_condition=False)
+        assert model.mock_version is None
+
+    async def test_update__local_version_is_unknown_after_caller_version_action(self, mocker):
+        connection = Connection()
+        mocker.patch.object(connection, 'transact_write_items')
+        for loaded in ({}, {'mock_version': 3}):
+            model = MockModel(4, 6, **loaded)
+            async with TransactWrite(connection=connection) as t:
+                t.update(model, actions=[MockModel.mock_version.set(9)])
+            assert model.mock_version is None
+
+    async def test_update__local_version_is_incremented_when_loaded(self, mocker):
+        connection = Connection()
+        mocker.patch.object(connection, 'transact_write_items')
+        model = MockModel(4, 6, mock_version=3)
+        async with TransactWrite(connection=connection) as t:
+            t.update(model, actions=[MockModel.mock_toot.set('hello')])
+        assert model.mock_version == 4

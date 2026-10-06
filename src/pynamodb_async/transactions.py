@@ -90,6 +90,7 @@ class TransactWrite(Transaction):
         self._put_items: List[Dict] = []
         self._update_items: List[Dict] = []
         self._models_for_version_attribute_update: List[Any] = []
+        self._models_with_unknown_version: List[Any] = []
 
     def condition_check(self, model_cls: Type[_M], hash_key: _KeyType, range_key: Optional[_KeyType] = None, condition: Optional[Condition] = None):
         if condition is None:
@@ -120,6 +121,10 @@ class TransactWrite(Transaction):
                return_values: Optional[str] = None,
                *,
                add_version_condition: bool = True) -> None:
+        # Decide before the version action is added: if the stored version is unknown to us (not loaded, or set by
+        # the caller), the local value cannot be derived after commit and is reset instead.
+        if model._version_after_update_is_unknown(actions):
+            self._models_with_unknown_version.append(model)
         operation_kwargs = model.get_update_kwargs_from_instance(
             actions=actions,
             condition=condition,
@@ -140,5 +145,8 @@ class TransactWrite(Transaction):
             return_item_collection_metrics=self._return_item_collection_metrics,
         )
         for model in self._models_for_version_attribute_update:
-            model.update_local_version_attribute()
+            if any(model is unknown for unknown in self._models_with_unknown_version):
+                model.reset_local_version_attribute()
+            else:
+                model.update_local_version_attribute()
         return response

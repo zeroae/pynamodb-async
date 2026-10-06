@@ -36,11 +36,12 @@ if sys.version_info >= (3, 8):
 else:
     from typing_extensions import Protocol
 
+from pynamodb.expressions.operand import Path
 from pynamodb.expressions.update import Action
 from pynamodb.exceptions import DoesNotExist, TableDoesNotExist, TableError, InvalidStateError, PutError, \
     AttributeNullError
 from pynamodb.attributes import (
-    AttributeContainer, AttributeContainerMeta, TTLAttribute, VersionAttribute
+    Attribute, AttributeContainer, AttributeContainerMeta, TTLAttribute, VersionAttribute
 )
 from pynamodb_async.connection.table import TableConnection
 from pynamodb.expressions.condition import Condition
@@ -958,21 +959,53 @@ class Model(AttributeContainer, metaclass=MetaModel):
             condition = version_attribute == value
             if attributes is not None:
                 attributes[version_attribute.attr_name] = self._serialize_value(version_attribute, value + 1)
-            if actions is not None:
+            if actions is not None and not self._has_action_on(actions, version_attribute):
                 actions.append(version_attribute.add(1))
         else:
             condition = version_attribute.does_not_exist()
             if attributes is not None:
                 attributes[version_attribute.attr_name] = self._serialize_value(version_attribute, 1)
-            if actions is not None:
-                actions.append(version_attribute.set(1))
+            if actions is not None and not self._has_action_on(actions, version_attribute):
+                # The stored version is unknown (not loaded): increment whatever is stored, or start
+                # at 1 for a new item. Setting it to 1 would roll a stored version back.
+                actions.append(version_attribute.set((version_attribute | 0) + 1))
 
         return condition
+
+    @staticmethod
+    def _has_action_on(actions: List[Action], attribute: Attribute[Any]) -> bool:
+        """
+        Whether the caller already supplied an action on the given attribute. Compared by document path
+        (the stored attribute name), since two actions on one path are rejected by DynamoDB.
+        """
+        return any(
+            isinstance(action.values[0], Path) and action.values[0].path == Path(attribute).path
+            for action in actions
+        )
 
     def update_local_version_attribute(self):
         if self._version_attribute_name is not None:
             value = getattr(self, self._version_attribute_name, None) or 0
             setattr(self, self._version_attribute_name, value + 1)
+
+    def _version_after_update_is_unknown(self, actions: List[Action]) -> bool:
+        """
+        Whether, after an update with these actions, the stored version cannot be derived locally: the
+        version was not loaded, or the caller supplied their own action on it.
+        Must be called before the actions are passed to :meth:`_handle_version_attribute`.
+        """
+        if self._version_attribute_name is None:
+            return False
+        version_attribute = self.get_attributes()[self._version_attribute_name]
+        return getattr(self, self._version_attribute_name) is None or self._has_action_on(actions, version_attribute)
+
+    def reset_local_version_attribute(self):
+        """
+        Marks the local version as unknown (None), to be loaded again with refresh().
+        """
+        if self._version_attribute_name is not None:
+            # VersionAttribute.__set__ casts to int, so drop the value instead of assigning None.
+            self.attribute_values.pop(self._version_attribute_name, None)
 
     @classmethod
     def _hash_key_attribute(cls):
